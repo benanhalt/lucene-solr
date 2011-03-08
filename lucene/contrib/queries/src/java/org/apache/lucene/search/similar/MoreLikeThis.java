@@ -588,7 +588,7 @@ public final class MoreLikeThis {
             fieldNames = fields.toArray(new String[fields.size()]);
         }
 
-        return createQuery(retrieveTerms(docNum));
+        return createQuery(retrieveTermsPreserveFields(docNum));//retrieveTerms(docNum));
     }
 
     /**
@@ -839,6 +839,72 @@ public final class MoreLikeThis {
         }
 
         return createQueue(termFreqMap);
+    }
+
+    private PriorityQueue<Object[]> retrieveTermsPreserveFields(int docNum) throws IOException {
+    	
+    	int numDocs = ir.numDocs();
+    	int numTerms = 0;
+    	
+    	Map<String, TermFreqVector> fieldsAndVectors = new HashMap<String, TermFreqVector>();
+    	
+    	for (int i = 0; i < fieldNames.length; i++) {
+    		String fieldName = fieldNames[i];
+    		TermFreqVector vector = ir.getTermFreqVector(docNum, fieldName);
+    		if (vector != null) {
+    			numTerms += vector.size();
+        		fieldsAndVectors.put(fieldName, vector);
+    		}
+    	}
+    	
+        FreqQ res = new FreqQ(numTerms); // will order words by score
+
+        Iterator<String> it = fieldsAndVectors.keySet().iterator();
+        while (it.hasNext()) { // for every word
+            String field = it.next();
+            TermFreqVector vector = fieldsAndVectors.get(field);
+    		BytesRef[] terms = vector.getTerms();
+    		int freqs[] = vector.getTermFrequencies();
+    		for (int j = 0; j < terms.length; j++) {
+    		    String term = terms[j].utf8ToString();
+    		
+    			if(isNoiseWord(term)){
+    				continue;
+    			}
+    			
+    			int tf = freqs[j]; // term freq in the source doc
+    			if (minTermFreq > 0 && tf < minTermFreq) {
+    				continue; // filter out words that don't occur enough times in the source
+    			}	
+
+    			int docFreq = ir.docFreq(new Term(field, term));
+
+    			if (minDocFreq > 0 && docFreq < minDocFreq) {
+    				continue; // filter out words that don't occur in enough docs
+    			}	
+
+    			if (docFreq > maxDocFreq) {
+    				continue; // filter out words that occur in too many docs            	
+    			}
+
+    			if (docFreq == 0) {
+    				continue; // index update problem?
+    			}
+
+    			float idf = similarity.idf(docFreq, numDocs);
+    			float score = tf * idf;
+
+    			// only really need 1st 3 entries, other ones are for troubleshooting
+    			res.insertWithOverflow(new Object[]{term,                   // the word
+                                    field,               // the top field
+                                    Float.valueOf(score),       // overall score
+                                    Float.valueOf(idf),         // idf
+                                    Integer.valueOf(docFreq),   // freq in all docs
+                                    Integer.valueOf(tf)
+    			});
+    		}
+        }
+        return res;
     }
 
 	/**
