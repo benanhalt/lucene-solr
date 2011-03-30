@@ -70,13 +70,13 @@ public class TemplateTransformer extends Transformer {
       // Verify if all variables can be resolved or not
       boolean resolvable = true;
       List<String> variables = getVars(expr);
-      for (String v : variables) {
-        if (resolver.resolve(v) == null) {
-          LOG.warn("Unable to resolve variable: " + v
-                  + " while parsing expression: " + expr);
-          resolvable = false;
-        }
-      }
+//      for (String v : variables) {
+//        if (resolver.resolve(v) == null) {
+//          LOG.warn("Unable to resolve variable: " + v
+//                  + " while parsing expression: " + expr);
+//          resolvable = false;
+//        }
+//      }
 
       if (!resolvable)
         continue;
