@@ -25,6 +25,7 @@ import java.io.StringReader;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -590,6 +591,16 @@ public final class MoreLikeThis {
 
         return createQuery(retrieveTermsPreserveFields(docNum));//retrieveTerms(docNum));
     }
+    
+    public Query like(Document doc) throws IOException {
+        if (fieldNames == null) {
+            // gather list of valid fields from lucene
+            Collection<String> fields = ir.getFieldNames( IndexReader.FieldOption.INDEXED);
+            fieldNames = fields.toArray(new String[fields.size()]);
+        }
+
+        return createQuery(retrieveTermsFromDoc(doc));//retrieveTerms(docNum));
+    }
 
     /**
      * Return a query that will return docs like the passed file.
@@ -725,6 +736,54 @@ public final class MoreLikeThis {
         }
         return res;
     }
+    
+    private PriorityQueue<Object[]> createQueuePreserveFields(
+            final Map<String, Map<String, Int>> fieldsToTermFreqs,
+            final int numTerms) throws IOException
+    {
+        final int numDocs = ir.numDocs();
+        final FreqQ result = new FreqQ(numTerms);
+        for (final String field: fieldsToTermFreqs.keySet()) {
+            final Map<String, Int> termFreqMap = fieldsToTermFreqs.get(field);
+            for (final String term: termFreqMap.keySet()) {
+                final int tf = termFreqMap.get(term).x;
+                if(isNoiseWord(term)){
+                    continue;
+                }
+                
+                if (minTermFreq > 0 && tf < minTermFreq) {
+                    continue; // filter out words that don't occur enough times in the source
+                }   
+
+                final int docFreq = ir.docFreq(new Term(field, term));
+
+                if (minDocFreq > 0 && docFreq < minDocFreq) {
+                    continue; // filter out words that don't occur in enough docs
+                }   
+
+                if (docFreq > maxDocFreq) {
+                    continue; // filter out words that occur in too many docs               
+                }
+
+                if (docFreq == 0) {
+                    continue; // index update problem?
+                }
+
+                final float idf = similarity.idf(docFreq, numDocs);
+                final float score = tf * idf;
+
+                // only really need 1st 3 entries, other ones are for troubleshooting
+                result.insertWithOverflow(new Object[]{term,                   // the word
+                                    field,               // the field
+                                    Float.valueOf(score),       // overall score
+                                    Float.valueOf(idf),         // idf
+                                    Integer.valueOf(docFreq),   // freq in all docs
+                                    Integer.valueOf(tf)
+                });               
+            }
+        }
+        return result;
+    }
 
     /**
      * Describe the parameters that control how the "more like this" query is formed.
@@ -840,71 +899,51 @@ public final class MoreLikeThis {
 
         return createQueue(termFreqMap);
     }
-
-    private PriorityQueue<Object[]> retrieveTermsPreserveFields(int docNum) throws IOException {
-    	
-    	int numDocs = ir.numDocs();
+    
+    private PriorityQueue<Object[]> retrieveTermsFromDoc(final Document doc) throws IOException {
+        final Map<String, Map<String, Int>> fieldsToTermFreqs = new HashMap<String, Map<String,Int>>();
+        int numTerms = 0;
+        for (final String fieldName: fieldNames) {
+            final Map<String, Int> termFreqMap = termFreqMapForField(fieldName, doc);
+            fieldsToTermFreqs.put(fieldName, termFreqMap);
+            numTerms += termFreqMap.size();
+        }
+        
+        return createQueuePreserveFields(
+                Collections.unmodifiableMap(fieldsToTermFreqs), 
+                numTerms
+               );
+    }
+    
+    private PriorityQueue<Object[]> retrieveTermsPreserveFields(final int docNum) throws IOException {        
+        final Map<String, Map<String, Int>> fieldsToTermFreqs = new HashMap<String, Map<String,Int>>();
     	int numTerms = 0;
-    	
-    	Map<String, TermFreqVector> fieldsAndVectors = new HashMap<String, TermFreqVector>();
-    	
-    	for (int i = 0; i < fieldNames.length; i++) {
-    		String fieldName = fieldNames[i];
-    		TermFreqVector vector = ir.getTermFreqVector(docNum, fieldName);
-    		if (vector != null) {
-    			numTerms += vector.size();
-        		fieldsAndVectors.put(fieldName, vector);
-    		}
+    	for (final String fieldName : fieldNames) {
+    		final TermFreqVector vector = ir.getTermFreqVector(docNum, fieldName);
+    		final Map<String, Int> termFreqs = Collections.unmodifiableMap(
+    		    (vector != null) ?
+    		        addTermFrequencies(new HashMap<String, MoreLikeThis.Int>(), vector) 
+    		        :
+    		        termFreqMapForField(fieldName, ir.document(docNum))
+    		);
+
+    		fieldsToTermFreqs.put(fieldName, termFreqs);
+    		numTerms += termFreqs.size();
     	}
     	
-        FreqQ res = new FreqQ(numTerms); // will order words by score
+    	return createQueuePreserveFields(
+    	        Collections.unmodifiableMap(fieldsToTermFreqs), 
+    	        numTerms
+    	       );
+    }
 
-        Iterator<String> it = fieldsAndVectors.keySet().iterator();
-        while (it.hasNext()) { // for every word
-            String field = it.next();
-            TermFreqVector vector = fieldsAndVectors.get(field);
-    		BytesRef[] terms = vector.getTerms();
-    		int freqs[] = vector.getTermFrequencies();
-    		for (int j = 0; j < terms.length; j++) {
-    		    String term = terms[j].utf8ToString();
-    		
-    			if(isNoiseWord(term)){
-    				continue;
-    			}
-    			
-    			int tf = freqs[j]; // term freq in the source doc
-    			if (minTermFreq > 0 && tf < minTermFreq) {
-    				continue; // filter out words that don't occur enough times in the source
-    			}	
-
-    			int docFreq = ir.docFreq(new Term(field, term));
-
-    			if (minDocFreq > 0 && docFreq < minDocFreq) {
-    				continue; // filter out words that don't occur in enough docs
-    			}	
-
-    			if (docFreq > maxDocFreq) {
-    				continue; // filter out words that occur in too many docs            	
-    			}
-
-    			if (docFreq == 0) {
-    				continue; // index update problem?
-    			}
-
-    			float idf = similarity.idf(docFreq, numDocs);
-    			float score = tf * idf;
-
-    			// only really need 1st 3 entries, other ones are for troubleshooting
-    			res.insertWithOverflow(new Object[]{term,                   // the word
-                                    field,               // the top field
-                                    Float.valueOf(score),       // overall score
-                                    Float.valueOf(idf),         // idf
-                                    Integer.valueOf(docFreq),   // freq in all docs
-                                    Integer.valueOf(tf)
-    			});
-    		}
+    private Map<String, Int> termFreqMapForField(final String fieldName, final Document doc) throws IOException {
+        final String values[] = doc.getValues(fieldName);
+        final Map<String, Int> termFreqMap = new HashMap<String, MoreLikeThis.Int>();
+        for (final String value: values) {
+            addTermFrequencies(new StringReader(value), termFreqMap, fieldName);
         }
-        return res;
+        return Collections.unmodifiableMap(termFreqMap);
     }
 
 	/**
@@ -912,7 +951,7 @@ public final class MoreLikeThis {
 	 * @param termFreqMap a Map of terms and their frequencies
 	 * @param vector List of terms and their frequencies for a doc/field
 	 */
-	private void addTermFrequencies(Map<String,Int> termFreqMap, TermFreqVector vector)
+	private Map<String, Int> addTermFrequencies(Map<String,Int> termFreqMap, TermFreqVector vector)
 	{
 		BytesRef[] terms = vector.getTerms();
 		int freqs[]=vector.getTermFrequencies();
@@ -933,6 +972,8 @@ public final class MoreLikeThis {
 		        cnt.x+=freqs[j];
 		    }
 		}
+		
+		return termFreqMap;
 	}
 	/**
 	 * Adds term frequencies found by tokenizing text from reader into the Map words
@@ -1091,6 +1132,10 @@ public final class MoreLikeThis {
 
         Int() {
             x = 1;
+        }
+        
+        Int(final int x) {
+            this.x = x;
         }
     }
     

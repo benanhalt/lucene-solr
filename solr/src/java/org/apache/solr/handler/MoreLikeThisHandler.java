@@ -18,6 +18,7 @@
 package org.apache.solr.handler;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.Reader;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -29,6 +30,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
+
+import org.apache.commons.io.IOUtils;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.Term;
@@ -36,14 +43,17 @@ import org.apache.lucene.queryParser.ParseException;
 import org.apache.lucene.search.*;
 import org.apache.lucene.search.similar.MoreLikeThis;
 import org.apache.solr.common.SolrException;
+import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.FacetParams;
 import org.apache.solr.common.params.MoreLikeThisParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.MoreLikeThisParams.TermStyle;
 import org.apache.solr.common.util.ContentStream;
+import org.apache.solr.common.util.ContentStreamBase;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.SimpleOrderedMap;
+import org.apache.solr.common.util.XMLErrorLogger;
 import org.apache.solr.core.SolrCore;
 import org.apache.solr.request.SimpleFacets;
 import org.apache.solr.request.SolrQueryRequest;
@@ -52,7 +62,10 @@ import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.*;
 
+import org.apache.solr.update.DocumentBuilder;
 import org.apache.solr.util.SolrPluginUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Solr MoreLikeThis --
@@ -65,10 +78,30 @@ public class MoreLikeThisHandler extends RequestHandlerBase
 {
   // Pattern is thread safe -- TODO? share this with general 'fl' param
   private static final Pattern splitList = Pattern.compile(",| ");
-  
+  private XMLInputFactory inputFactory;
+
+  public static final Logger log = LoggerFactory.getLogger(MoreLikeThisHandler.class);
+  private static final XMLErrorLogger xmllog = new XMLErrorLogger(log);
+
   @Override
   public void init(NamedList args) {
     super.init(args);
+    inputFactory = XMLInputFactory.newInstance();
+    
+    try {
+      // The java 1.6 bundled stax parser (sjsxp) does not currently have a thread-safe
+      // XMLInputFactory, as that implementation tries to cache and reuse the
+      // XMLStreamReader.  Setting the parser-specific "reuse-instance" property to false
+      // prevents this.
+      // All other known open-source stax parsers (and the bea ref impl)
+      // have thread-safe factories.
+      inputFactory.setProperty("reuse-instance", Boolean.FALSE);
+    } catch (IllegalArgumentException ex) {
+      // Other implementations will likely throw this exception since "reuse-instance"
+      // isimplementation specific.
+      log.debug("Unable to set the 'reuse-instance' property for the input factory: " + inputFactory);
+    }
+    inputFactory.setXMLReporter(xmllog);
   }
 
   @Override
@@ -145,8 +178,16 @@ public class MoreLikeThisHandler extends RequestHandlerBase
       // Find documents MoreLikeThis - either with a reader or a query
       // --------------------------------------------------------------------------------
       if (reader != null) {
-        mltDocs = mlt.getMoreLikeThis(reader, start, rows, filters,
-            interesting, flags);
+        final boolean ds = req.getParams().getBool(MoreLikeThisParams.DOC_SUPPLIED, false);
+        if (ds)
+        {
+            final Document doc = readDocument(req);
+            mltDocs = mlt.getMoreLikeThis(doc, start, rows, filters, 
+                    interesting, flags);
+        } else {
+            mltDocs = mlt.getMoreLikeThis(reader, start, rows, filters,
+                    interesting, flags);
+        }
       } else if (q != null) {
         // Matching options
         boolean includeMatch = params.getBool(MoreLikeThisParams.MATCH_INCLUDE,
@@ -251,7 +292,135 @@ public class MoreLikeThisHandler extends RequestHandlerBase
     }
   }
   
-  public static class InterestingTerm
+  /**
+   * Extracts the only content stream from the request. {@link org.apache.solr.common.SolrException.ErrorCode#BAD_REQUEST}
+   * error is thrown if the request doesn't hold any content stream or holds more than one.
+   *
+   * @param req The solr request.
+   *
+   * @return The single content stream which holds the documents to be analyzed.
+   */
+  private ContentStream extractSingleContentStream(SolrQueryRequest req) {
+    final SolrException e = new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+        "MoreLikeThisHandler expects a single content stream with a document");
+    
+    Iterable<ContentStream> streams = req.getContentStreams();
+    if (streams == null)
+      throw e;
+    Iterator<ContentStream> iter = streams.iterator();
+    if (!iter.hasNext()) 
+      throw e;
+    ContentStream stream = iter.next();
+    if (iter.hasNext()) 
+      throw e;
+    return stream;
+  }
+  
+  private Document readDocument(final SolrQueryRequest req) throws IOException, XMLStreamException
+  {
+      final ContentStream stream = extractSingleContentStream(req);
+      final InputStream is = stream.getStream();
+      
+     try {
+         final String charset = ContentStreamBase.getCharsetFromContentType(stream.getContentType());
+         final XMLStreamReader parser = (charset == null) ?
+                 inputFactory.createXMLStreamReader(is) 
+                 : 
+                 inputFactory.createXMLStreamReader(is, charset);
+          try {
+              final SolrInputDocument doc = parseXML(parser);
+              return DocumentBuilder.toDocument(doc, req.getSchema());
+          } finally {
+              if (parser != null) parser.close();              
+          }
+      } finally {
+        IOUtils.closeQuietly(is);
+      }                
+  }
+                  
+  private SolrInputDocument parseXML(final XMLStreamReader parser) throws XMLStreamException
+  {
+      while (true) {
+          final int event = parser.next();
+          final String localName = parser.getLocalName();
+          switch (event) {
+              case XMLStreamConstants.START_ELEMENT: 
+                  if ("doc".equals(localName)) {
+                      log.trace("Reading doc...");
+                      return parseDocument(parser);
+                  }
+                  break;
+          }
+      }
+  }
+      
+  private SolrInputDocument parseDocument(final XMLStreamReader parser) throws XMLStreamException
+  {
+      assert "doc".equals(parser.getLocalName());
+      final SolrInputDocument doc = new SolrInputDocument();
+      
+      while (true) {
+          final int event = parser.next();
+          switch (event) {
+            case XMLStreamConstants.END_ELEMENT:
+              if ("doc".equals(parser.getLocalName())) {
+               return doc;
+              } 
+              break;
+
+            case XMLStreamConstants.START_ELEMENT:
+              final String localName = parser.getLocalName();
+              if (!"field".equals(localName)) {
+                log.warn("unexpected XML tag doc/" + localName);
+                throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "unexpected XML tag doc/" + localName);
+              }
+
+              parseField(parser, doc);
+              break;
+          }
+      }      
+  }
+      
+  private void parseField(final XMLStreamReader parser, final SolrInputDocument doc) throws XMLStreamException
+  {
+      assert "field".equals(parser.getLocalName());
+      final String fieldName = getFieldName(parser);
+      final StringBuilder text = new StringBuilder();
+      
+      while (true) {
+          final int event = parser.next();
+          switch (event) {
+            // Add everything to the text
+            case XMLStreamConstants.SPACE:
+            case XMLStreamConstants.CDATA:
+            case XMLStreamConstants.CHARACTERS:
+              text.append(parser.getText());
+              break;
+
+            case XMLStreamConstants.END_ELEMENT:
+                if ("field".equals(parser.getLocalName())) {
+                    doc.addField(fieldName, text.toString());
+                }
+                break;
+          }
+      }
+  }
+
+  private String getFieldName(final XMLStreamReader parser)
+  {
+      assert "field".equals(parser.getLocalName());
+      for (int i = 0; i < parser.getAttributeCount(); i++) {
+          final String attrName = parser.getAttributeLocalName(i);
+          if ("name".equals(attrName)) {
+            return parser.getAttributeValue(i);
+          }
+      }
+      
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "found field with no name");
+  }
+
+
+public static class InterestingTerm
   {
     public Term term;
     public float boost;
@@ -380,6 +549,27 @@ public class MoreLikeThisHandler extends RequestHandlerBase
       return results;
     }
 
+    public DocListAndSet getMoreLikeThis(final Document doc, 
+                                         final int start, 
+                                         final int rows, 
+                                         final List<Query> filters, 
+                                         final List<InterestingTerm> terms, 
+                                         final int flags ) throws IOException
+    {
+      rawMLTQuery = mlt.like(doc);
+      boostedMLTQuery = getBoostedQuery( rawMLTQuery );
+      if( terms != null ) {
+        fillInterestingTermsFromMLTQuery( boostedMLTQuery, terms );
+      }
+      DocListAndSet results = new DocListAndSet();
+      if (this.needDocSet) {
+        results = searcher.getDocListAndSet( boostedMLTQuery, filters, null, start, rows, flags);
+      } else {
+        results.docList = searcher.getDocList( boostedMLTQuery, filters, null, start, rows, flags);
+      }
+      return results;
+    }
+
     @Deprecated
     public NamedList<DocList> getMoreLikeThese( DocList docs, int rows, int flags ) throws IOException
     {
@@ -418,7 +608,8 @@ public class MoreLikeThisHandler extends RequestHandlerBase
   }
   
   
-  //////////////////////// SolrInfoMBeans methods //////////////////////
+
+//////////////////////// SolrInfoMBeans methods //////////////////////
 
   @Override
   public String getVersion() {
