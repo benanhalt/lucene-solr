@@ -30,6 +30,7 @@ import org.apache.solr.client.solrj.SolrServer;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.client.solrj.util.ClientUtils;
+import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.MoreLikeThisParams;
@@ -51,7 +52,7 @@ public class MoreLikeThisDocumentRequest extends SolrRequest
 
     public MoreLikeThisDocumentRequest(SolrParams params)
     {
-        super(METHOD.GET, null);
+        super(METHOD.POST, null);
         this.params = params;
     }
     
@@ -124,6 +125,10 @@ public class MoreLikeThisDocumentRequest extends SolrRequest
       return this;
     }
 
+    public MoreLikeThisDocumentRequest addDocument(SolrDocument doc) {
+        documents.add(ClientUtils.toSolrInputDocument(doc));
+        return this;
+      }
     /**
      * Adds a collection of documents to be analyzed.
      *

@@ -400,6 +400,7 @@ public class MoreLikeThisHandler extends RequestHandlerBase
             case XMLStreamConstants.END_ELEMENT:
                 if ("field".equals(parser.getLocalName())) {
                     doc.addField(fieldName, text.toString());
+                    return;
                 }
                 break;
           }
