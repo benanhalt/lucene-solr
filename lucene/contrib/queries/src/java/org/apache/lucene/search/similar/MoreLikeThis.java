@@ -579,6 +579,25 @@ public final class MoreLikeThis {
     /**
      * Return a query that will return docs like the passed lucene document ID.
      *
+     * Does not mix fields.
+     * 
+     * @param docNum the documentID of the lucene doc to generate the 'More Like This" query for.
+     * @return a query that will return docs like the passed lucene document ID.
+     */
+    public Query likePreserveFields(int docNum) throws IOException {
+        if (fieldNames == null) {
+            // gather list of valid fields from lucene
+            Collection<String> fields = ir.getFieldNames( IndexReader.FieldOption.INDEXED);
+            fieldNames = fields.toArray(new String[fields.size()]);
+        }
+
+        return createQuery(retrieveTermsPreserveFields(docNum));
+    }
+    
+    
+    /**
+     * Return a query that will return docs like the passed lucene document ID.
+     *
      * @param docNum the documentID of the lucene doc to generate the 'More Like This" query for.
      * @return a query that will return docs like the passed lucene document ID.
      */
@@ -589,9 +608,9 @@ public final class MoreLikeThis {
             fieldNames = fields.toArray(new String[fields.size()]);
         }
 
-        return createQuery(retrieveTermsPreserveFields(docNum));//retrieveTerms(docNum));
+        return createQuery(retrieveTerms(docNum));
     }
-    
+      
     public Query like(Document doc) throws IOException {
         if (fieldNames == null) {
             // gather list of valid fields from lucene
@@ -599,7 +618,7 @@ public final class MoreLikeThis {
             fieldNames = fields.toArray(new String[fields.size()]);
         }
 
-        return createQuery(retrieveTermsFromDoc(doc));//retrieveTerms(docNum));
+        return createQuery(retrieveTermsFromDoc(doc));
     }
 
     /**

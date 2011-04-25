@@ -448,6 +448,7 @@ public static class InterestingTerm
     final SchemaField uniqueKeyField;
     final boolean needDocSet;
     Map<String,Float> boostFields;
+    final boolean preserveFields;
     
     public MoreLikeThisHelper( SolrParams params, SolrIndexSearcher searcher )
     {
@@ -476,6 +477,7 @@ public static class InterestingTerm
       mlt.setMaxNumTokensParsed(params.getInt(MoreLikeThisParams.MAX_NUM_TOKENS_PARSED, MoreLikeThis.DEFAULT_MAX_NUM_TOKENS_PARSED));
       mlt.setBoost(            params.getBool(MoreLikeThisParams.BOOST, false ) );
       boostFields = SolrPluginUtils.parseFieldBoosts(params.getParams(MoreLikeThisParams.QF));
+      preserveFields = params.getBool(MoreLikeThisParams.PRESERVE_FIELDS, false);
     }
     
     private Query rawMLTQuery;
@@ -512,7 +514,7 @@ public static class InterestingTerm
     public DocListAndSet getMoreLikeThis( int id, int start, int rows, List<Query> filters, List<InterestingTerm> terms, int flags ) throws IOException
     {
       Document doc = reader.document(id);
-      rawMLTQuery = mlt.like(id);
+      rawMLTQuery = preserveFields ? mlt.likePreserveFields(id) : mlt.like(id);
       boostedMLTQuery = getBoostedQuery( rawMLTQuery );
       if( terms != null ) {
         fillInterestingTermsFromMLTQuery( rawMLTQuery, terms );
